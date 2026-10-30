@@ -1,5 +1,13 @@
 {
   "name": "conso-live",
-  "owner": { "name": "YousefBeLike" },
-  "plugins": [{ "name": "conso-live", "source": "./" }]
+  "owner": {
+    "name": "YousefBeLike"
+  },
+  "plugins": [
+    {
+      "name": "conso-live",
+      "source": "./"
+    }
+  ],
+  "description": "Consommation de tokens Claude en direct dans Claude Code"
 }
