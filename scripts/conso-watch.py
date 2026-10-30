@@ -5,22 +5,30 @@ Two sources:
   under <config>/projects, tailed as they grow, for the exact token counts of
   each response; the last seven days are read once at start, so the limits
   can be weighed in tokens at once;
-- account: the subscription's usage endpoint on api.anthropic.com, polled
-  once a minute in a thread of its own, for each window's percentage, which
-  every client of the account moves (claude.ai, other machines, other people).
+- account: the subscription's usage endpoint on api.anthropic.com, read once
+  a minute, for each window's percentage, which every client of the account
+  moves (claude.ai, other machines, other people).
+
+Every session runs its own watcher, but the account is read by one of them at
+a time: the reading, its recent history and any back-off are shared through a
+cache file, so ten open sessions cost the endpoint what one does.
 
 Lines printed:
   {"t": "local", "total": tok/s, "output": tok/s, "sessions": n,
    "windows": {"<window>": {"total": tokens, "output": tokens}, ...}}
   {"t": "account", "limits": [{"kind", "percentUsed", "resetsAt"}, ...],
-   "pct_per_min": slope | null, "local_rate": tok/s | null}
-  {"t": "calib", "<window>": tokens per percent, ...}
+   "at": when read, "pct_per_min": slope | null, "local_rate": tok/s | null}
+  {"t": "account", "error": reason, "at": when it failed}
+  {"t": "calib", "<window>": [tokens per percent, percent it was weighed at], ...}
 
 A window's tokens are this machine's since the window opened, counting only
-the window's model where it is one model's (Opus, Sonnet).
+the window's model where it is one model's (Opus, Sonnet). When a window's
+reset time passes, its count starts again from zero at once, and the account
+is read again a few seconds later.
 """
 
 import datetime
+import fcntl
 import json
 import math
 import os
@@ -34,15 +42,22 @@ CONFIG = os.environ.get('CLAUDE_CONFIG_DIR') or os.path.expanduser('~/.claude')
 PROJECTS = os.path.join(CONFIG, 'projects')
 CREDENTIALS = os.path.join(CONFIG, '.credentials.json')
 USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+CACHE_DIR = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.expanduser('~/.cache'), 'conso-live')
+CACHE = os.path.join(CACHE_DIR, 'usage.json')
+LOCK = os.path.join(CACHE_DIR, 'usage.lock')
 
 TICK = 0.1            # seconds between local readings: 10 per second
-RESCAN = 5.0          # seconds between looks for new transcript files
+RESCAN = 2.0          # seconds between looks for new transcript files
 QUIET = 3600.0        # a file unchanged this long is checked at rescans only
 HISTORY = 7 * 86400   # seconds of responses kept, the longest window
 TAU = 15.0            # seconds the local rate takes to fall to a third
 FRESH = 30.0          # a response newer than this moves the rate
-ACTIVE = 60.0         # a session with a response this recent is active
+IDLE = 20.0           # with no response for this long, the rate falls fast
+IDLE_TAU = 2.0
+ACTIVE = 45.0         # a session whose transcript grew this recently is active
 POLL = 60.0           # seconds between account readings
+CHECK = 2.0           # seconds between looks at the shared reading
+AFTER_RESET = 5.0     # seconds after a reset before the account is read again
 MAX_BACKOFF = 600.0
 SLOPE_SPAN = 300.0    # seconds of account readings a slope needs at least
 SLOPE_KEEP = 900.0    # seconds of account readings kept
@@ -71,6 +86,12 @@ def stamp(text):
         return None
 
 
+def session_of(path):
+    """The session a transcript belongs to: a subagent's is its parent's."""
+    parts = os.path.relpath(path, PROJECTS).split(os.sep)
+    return parts[1][:-6] if len(parts) == 2 and parts[1].endswith('.jsonl') else parts[1] if len(parts) > 1 else path
+
+
 class Local:
     def __init__(self):
         self.lock = threading.Lock()
@@ -80,13 +101,14 @@ class Local:
         # Counted so far per message id: a response is written once per block.
         self.seen = {}
         self.events = []  # (time, total, output, path, model), oldest first
-        self.starts = {}  # window -> when it opened, as the account last said
+        self.starts = {}  # window -> when it opened
         self.windows = {}  # window -> [total, output] since it opened
         self.total_rate = 0.0
         self.output_rate = 0.0
+        self.last_event = 0.0  # when the rate last took a response in
         self.ticked = time.time()
         self.scanned = 0.0
-        self.is_ready = False
+        self.is_ready = threading.Event()
 
     def scan(self, now):
         """Finds transcript files; one untouched for a week is read from its end."""
@@ -114,10 +136,13 @@ class Local:
             if not is_rescan and now - self.changed.get(path, 0) > QUIET:
                 continue
             try:
-                size = os.path.getsize(path)
+                stat = os.stat(path)
             except OSError:
                 del self.offsets[path]
+                self.changed.pop(path, None)
+                self.partial.pop(path, None)
                 continue
+            size = stat.st_size
             if size < offset:
                 offset = 0
                 self.partial.pop(path, None)
@@ -130,7 +155,9 @@ class Local:
             except OSError:
                 continue
             self.offsets[path] = size
-            self.changed[path] = now
+            # When the session wrote, not when this read it: a week read at
+            # start leaves only the sessions still at work active.
+            self.changed[path] = stat.st_mtime
             text = self.partial.pop(path, b'') + chunk
             lines = text.split(b'\n')
             if lines[-1]:
@@ -138,15 +165,23 @@ class Local:
             for line in lines[:-1]:
                 self.count(line, path, now)
 
-        # The rate decays smoothly between responses instead of stepping.
-        decay = math.exp(-(now - self.ticked) / TAU)
+        # The rate decays smoothly between responses instead of stepping, and
+        # falls to nothing within seconds once no session answers any more.
+        tau = TAU if now - self.last_event < IDLE else IDLE_TAU
+        decay = math.exp(-(now - self.ticked) / tau)
         self.total_rate *= decay
         self.output_rate *= decay
+        if self.total_rate < 0.5:
+            self.total_rate = self.output_rate = 0.0
         self.ticked = now
         with self.lock:
-            while self.events and now - self.events[0][0] > HISTORY:
-                self.events.pop(0)
-        self.is_ready = True
+            drop = 0
+            while drop < len(self.events) and now - self.events[drop][0] > HISTORY:
+                drop += 1
+            if drop:
+                del self.events[:drop]
+        self.roll(now)
+        self.is_ready.set()
 
     def count(self, line, path, now):
         if b'"usage"' not in line:
@@ -185,6 +220,7 @@ class Local:
         if now - at < FRESH:
             self.total_rate += total / TAU
             self.output_rate += delta[1] / TAU
+            self.last_event = now
 
     def open_window(self, kind, start):
         """Counts the window's tokens again from when it opened."""
@@ -199,6 +235,13 @@ class Local:
                     figures[1] += e[2]
             self.windows[kind] = figures
 
+    def roll(self, now):
+        """Starts a window's count again once its reset time has passed."""
+        for kind, start in list(self.starts.items()):
+            length = WINDOWS[kind][0]
+            if now >= start + length:
+                self.open_window(kind, start + length * math.floor((now - start) / length))
+
     def window_total(self, kind):
         with self.lock:
             return self.windows.get(kind, [0, 0])[0]
@@ -209,8 +252,8 @@ class Local:
 
     def reading(self):
         now = time.time()
+        sessions = len({session_of(p) for p, t in list(self.changed.items()) if now - t <= ACTIVE})
         with self.lock:
-            sessions = len({e[3] for e in reversed(self.events[-500:]) if now - e[0] <= ACTIVE})
             windows = {k: {'total': v[0], 'output': v[1]} for k, v in self.windows.items()}
         return {'t': 'local', 'total': self.total_rate, 'output': self.output_rate,
                 'sessions': sessions, 'windows': windows}
@@ -221,84 +264,160 @@ def counts(kind, model):
     return family is None or family in model.lower()
 
 
+def load_cache():
+    try:
+        with open(CACHE) as f:
+            cache = json.load(f)
+        return cache if isinstance(cache, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_cache(cache):
+    temp = '%s.%d' % (CACHE, os.getpid())
+    with open(temp, 'w') as f:
+        json.dump(cache, f)
+    os.replace(temp, CACHE)
+
+
+def limits_of(body):
+    """Every window the account reports, whatever its name."""
+    limits = []
+    for kind, window in (body or {}).items():
+        if isinstance(window, dict) and isinstance(window.get('utilization'), (int, float)):
+            limit = {'kind': kind, 'percentUsed': window['utilization']}
+            if window.get('resets_at'):
+                limit['resetsAt'] = window['resets_at']
+            limits.append(limit)
+    return limits
+
+
+def is_due(cache, now):
+    """Whether the shared reading is old enough, or a window reset since."""
+    if now < cache.get('next_at', 0):
+        return False
+    at = cache.get('at', 0)
+    if now - at >= POLL:
+        return True
+    for limit in limits_of(cache.get('body')):
+        resets = stamp(limit.get('resetsAt'))
+        if resets and at < resets + AFTER_RESET <= now:
+            return True
+    return False
+
+
 class Account(threading.Thread):
     def __init__(self, local):
         super().__init__(daemon=True)
         self.local = local
-        self.backoff = POLL
-        self.history = []  # (time, five-hour percent)
+        self.shown = None  # the cache's reading this watcher last printed
 
     def run(self):
+        os.makedirs(CACHE_DIR, exist_ok=True)
         while True:
-            # Weighing the limits needs the week of transcripts read first.
-            while not self.local.is_ready:
-                time.sleep(0.2)
-            self.poll()
-            time.sleep(self.backoff)
+            try:
+                self.step()
+            except Exception as error:  # a bad cache or a full disk must not end the thread
+                emit({'t': 'account', 'error': type(error).__name__, 'at': time.time()})
+            time.sleep(CHECK)
 
-    def poll(self):
+    def step(self):
         now = time.time()
+        cache = load_cache()
+        if is_due(cache, now):
+            # One watcher reads the account; the others wait for its reading.
+            with open(LOCK, 'w') as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return
+                cache = load_cache()
+                if is_due(cache, now):
+                    cache = self.fetch(cache, now)
+                    save_cache(cache)
+        # Weighing the limits needs the week of transcripts read first.
+        mark = (cache.get('at'), cache.get('error'), self.local.is_ready.is_set())
+        if mark != self.shown:
+            self.shown = mark
+            self.show(cache)
+
+    def fetch(self, cache, now):
+        cache = dict(cache)
+        backoff = cache.get('backoff') or POLL
         try:
             with open(CREDENTIALS) as f:
                 token = json.load(f)['claudeAiOauth']['accessToken']
-        except (OSError, ValueError, KeyError, TypeError):
-            emit({'t': 'account', 'error': 'no-credentials'})
-            return
-        request = urllib.request.Request(USAGE_URL, headers={
-            'Authorization': 'Bearer ' + token,
-            'anthropic-beta': 'oauth-2025-04-20',
-            'User-Agent': 'conso-live',
-        })
-        try:
+            request = urllib.request.Request(USAGE_URL, headers={
+                'Authorization': 'Bearer ' + token,
+                'anthropic-beta': 'oauth-2025-04-20',
+                'User-Agent': 'conso-live',
+            })
             with urllib.request.urlopen(request, timeout=15) as response:
                 body = json.loads(response.read().decode())
-        except urllib.error.HTTPError as error:
-            if error.code == 429:
-                self.backoff = min(MAX_BACKOFF, self.backoff * 2)
-            emit({'t': 'account', 'error': 'http-%d' % error.code})
-            return
-        except (OSError, ValueError):
-            emit({'t': 'account', 'error': 'network'})
-            return
-        self.backoff = POLL
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            if isinstance(error, urllib.error.HTTPError):
+                reason = 'http-%d' % error.code
+                if error.code == 429:
+                    backoff = min(MAX_BACKOFF, backoff * 2)
+                    try:
+                        backoff = max(backoff, min(MAX_BACKOFF, float(error.headers.get('Retry-After') or 0)))
+                    except ValueError:
+                        pass
+            elif isinstance(error, (KeyError, TypeError)) or getattr(error, 'filename', None) == CREDENTIALS:
+                reason = 'no-credentials'
+            else:
+                reason = 'network'
+            cache.update(error=reason, failed_at=now, next_at=now + backoff, backoff=backoff)
+            return cache
 
-        # Every window the account reports, whatever its name.
-        limits = []
-        for kind, window in body.items():
-            if isinstance(window, dict) and isinstance(window.get('utilization'), (int, float)):
-                limit = {'kind': kind, 'percentUsed': window['utilization']}
-                if window.get('resets_at'):
-                    limit['resetsAt'] = window['resets_at']
-                limits.append(limit)
+        # The five-hour percent over the last minutes, for the account's rate.
+        history = [h for h in cache.get('history') or [] if now - h[0] <= SLOPE_KEEP]
+        five = (body.get('five_hour') or {}).get('utilization')
+        if isinstance(five, (int, float)):
+            if history and five < history[-1][1]:
+                history = []  # the window was reset
+            history.append([now, float(five)])
+        # A reset passing reads the account again before the minute is up.
+        return {'at': now, 'body': body, 'history': history, 'next_at': 0, 'backoff': POLL}
 
-        # Each window weighed by this machine's tokens since it opened.
+    def show(self, cache):
+        # The last good reading is still shown after a failure, marked stale.
+        error = cache.get('error') if cache.get('failed_at', 0) >= cache.get('at', 0) else None
+        body = cache.get('body')
+        if not body:
+            if error:
+                emit({'t': 'account', 'error': error})
+            return
+        at = cache.get('at', 0)
+        limits = limits_of(body)
+        payload = {'t': 'account', 'limits': limits, 'at': at, 'error': error,
+                   'pct_per_min': None, 'local_rate': None}
+        if not self.local.is_ready.is_set():
+            emit(payload)
+            return
+
+        # Each window weighed by this machine's tokens since it opened; a
+        # window whose reset passed since the reading is left to roll.
         calibration = {}
         for limit in limits:
             kind = limit['kind']
             resets = stamp(limit.get('resetsAt'))
-            if kind not in WINDOWS or not resets:
+            if kind not in WINDOWS or not resets or resets <= time.time():
                 continue
             self.local.open_window(kind, resets - WINDOWS[kind][0])
             spent = self.local.window_total(kind)
             if limit['percentUsed'] >= MIN_PERCENT and spent > 0:
-                calibration[kind] = spent / limit['percentUsed']
+                calibration[kind] = [spent / limit['percentUsed'], limit['percentUsed']]
         if calibration:
             emit(dict(calibration, t='calib'))
 
-        five = (body.get('five_hour') or {}).get('utilization')
-        slope = None
-        local_rate = None
-        if isinstance(five, (int, float)):
-            if self.history and five < self.history[-1][1]:
-                self.history = []  # the window was reset
-            self.history.append((now, float(five)))
-            self.history = [h for h in self.history if now - h[0] <= SLOPE_KEEP]
-            first = self.history[0]
-            if now - first[0] >= SLOPE_SPAN:
-                slope = (five - first[1]) / ((now - first[0]) / 60.0)
-                # This machine over the same span, so the two compare.
-                local_rate = self.local.since(first[0]) / (now - first[0])
-        emit({'t': 'account', 'limits': limits, 'pct_per_min': slope, 'local_rate': local_rate})
+        history = cache.get('history') or []
+        if history and at - history[0][0] >= SLOPE_SPAN:
+            first = history[0]
+            payload['pct_per_min'] = (history[-1][1] - first[1]) / ((at - first[0]) / 60.0)
+            # This machine over the same span, so the two compare.
+            payload['local_rate'] = self.local.since(first[0]) / (at - first[0])
+        emit(payload)
 
 
 def main():

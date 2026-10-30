@@ -13,6 +13,13 @@ const CHARS_PER_TOKEN = 3.5
 const MIN_STEP = 1
 // Past this many points learnt, a new reading moves the figure by a fixed share.
 const MAX_WEIGHT = 40
+// A window weighed at this percent or more replaces the figure outright; under
+// it, the whole percent the account rounds to is too coarse.
+const TRUSTED_PERCENT = 5
+// Seconds before a watcher that stopped is started again, doubling up to the last.
+const RESTART_S = [2, 5, 15, 60]
+// The account is read once a minute: past this, its reading is called stale.
+const STALE_MS = 3 * 60_000
 
 // Change a tag when its value's fields change: it declines what an earlier
 // version stored, which outlives a reload.
@@ -36,12 +43,14 @@ const IDLE_WIDE: Wide = {
   localSessions: 0,
   windows: {},
   accountLimits: null,
+  accountAt: null,
   accountSlope: null,
   localSpanRate: null,
   accountError: null,
   isRunning: false,
+  runner: '',
 }
-const wide = atom({ plugin: 'conso-live', key: 'wide' } as const, IDLE_WIDE, { shape: 'wide-2' })
+const wide = atom({ plugin: 'conso-live', key: 'wide' } as const, IDLE_WIDE, { shape: 'wide-3' })
 const now = atom({ plugin: 'conso-live', key: 'now' } as const, 0)
 
 const LABELS: Record<string, string> = {
@@ -87,6 +96,18 @@ const fmtReset = (resetsAt: string, at: number) => {
   const hours = Math.floor((left % 86_400_000) / 3_600_000)
   const minutes = Math.floor((left % 3_600_000) / 60_000)
   return days > 0 ? `${days} j ${hours} h` : hours > 0 ? `${hours} h ${minutes} min` : `${minutes} min`
+}
+
+// A limit as it stands at `at`: once its reset time has passed, the window
+// starts again from zero, before the account is read anew.
+const current = (lim: Limit, at: number): Limit & { isReset: boolean } =>
+  lim.resetsAt && new Date(lim.resetsAt).getTime() <= at
+    ? { kind: lim.kind, percentUsed: 0, isReset: true }
+    : { ...lim, isReset: false }
+
+const ago = (ms: number) => {
+  const minutes = Math.floor(ms / 60_000)
+  return minutes < 1 ? "à l'instant" : minutes < 60 ? `il y a ${minutes} min` : `il y a ${Math.floor(minutes / 60)} h`
 }
 
 const refresh = async ($: EngineInterface) => {
@@ -162,13 +183,30 @@ async function calibrate($: EngineInterface, limits: Limit[]) {
   await $.store.set('calibration', next)
 }
 
-// Runs scripts/conso-watch.py for as long as the module is loaded and folds each
-// line it prints into `wide`.
-async function watch($: EngineInterface) {
+// Keeps scripts/conso-watch.py running for as long as the module is loaded,
+// starting it again whenever it stops.
+async function supervise($: EngineInterface) {
+  const runner = `${Date.now()}-${Math.random()}`
+  for (let failures = 0; ; failures++) {
+    const startedAt = Date.now()
+    try {
+      await watch($, runner)
+    } catch {
+      // Started again below.
+    }
+    // A watcher that ran a while had not failed: its restart is quick again.
+    if (Date.now() - startedAt > 120_000) failures = 0
+    const wait = RESTART_S[Math.min(failures, RESTART_S.length - 1)] ?? 60
+    await $.clock.sleep(wait * 1000)
+  }
+}
+
+// Runs the watcher once and folds each line it prints into `wide`.
+async function watch($: EngineInterface, runner: string) {
   const watcher = $.process.spawn({ argv: ['python3', '-I', `${$.plugin.root}/scripts/conso-watch.py`] })
   let pending = ''
 
-  await update($, wide, w => ({ ...w, isRunning: true }))
+  await update($, wide, w => ({ ...w, isRunning: true, runner }))
   try {
     for await (const piece of watcher) {
       if (piece.stream !== 'stdout') continue
@@ -191,30 +229,42 @@ async function watch($: EngineInterface) {
           }))
         } else if (reading.t === 'calib') {
           // Weighed from this machine's whole history: it replaces what this
-          // session learnt on its own.
-          const weighed: Calibration = {}
-          for (const [kind, perPercent] of Object.entries(reading)) {
-            if (typeof perPercent === 'number' && perPercent > 0) weighed[kind] = { perPercent, weight: MAX_WEIGHT }
-          }
-          const next = await update($, calibration, old => ({ ...old, ...weighed }))
+          // session learnt on its own, unless the window is too fresh to tell
+          // better than the figure already kept (just after a reset).
+          const next = await update($, calibration, old => {
+            const merged: Calibration = { ...old }
+            for (const [kind, figure] of Object.entries(reading)) {
+              if (!Array.isArray(figure)) continue
+              const [perPercent, percent] = figure as [number, number]
+              if (!(perPercent > 0)) continue
+              const prior = merged[kind]
+              if (!prior || percent >= TRUSTED_PERCENT || percent >= prior.weight) {
+                merged[kind] = { perPercent, weight: percent }
+              }
+            }
+            return merged
+          })
           await $.store.set('calibration', next)
         } else if (reading.t === 'account') {
+          const error = typeof reading.error === 'string' ? reading.error : null
           await update($, wide, w =>
-            typeof reading.error === 'string'
-              ? { ...w, accountError: reading.error as string }
-              : {
+            Array.isArray(reading.limits)
+              ? {
                   ...w,
-                  accountError: null,
-                  accountLimits: Array.isArray(reading.limits) ? (reading.limits as Limit[]) : w.accountLimits,
+                  accountError: error,
+                  accountLimits: reading.limits as Limit[],
+                  accountAt: typeof reading.at === 'number' ? reading.at * 1000 : w.accountAt,
                   accountSlope: typeof reading.pct_per_min === 'number' ? reading.pct_per_min : null,
                   localSpanRate: typeof reading.local_rate === 'number' ? reading.local_rate : null,
-                },
+                }
+              : { ...w, accountError: error },
           )
         }
       }
     }
   } finally {
-    await update($, wide, w => ({ ...w, isRunning: false }))
+    // A watcher started since (after a reload) keeps its own mark.
+    await update($, wide, w => (w.runner === runner ? { ...w, isRunning: false } : w))
   }
 }
 
@@ -232,11 +282,12 @@ export const register: Register = on => {
     await refresh($)
     await update($, live, () => ({ estimate: 0, rate: 0, streams: 0 }))
     await update($, wide, () => IDLE_WIDE)
-    void watch($).catch(() => undefined)
+    void supervise($).catch(() => undefined)
 
     tick?.cancel()
-    // Keeps the reset countdowns current between turns.
-    tick = $.clock.every(30_000, () => void update($, now, () => Date.now()))
+    // Keeps the reset countdowns current between turns, and turns a window
+    // over to zero within seconds of its reset.
+    tick = $.clock.every(5_000, () => void update($, now, () => Date.now()))
 
     return next(e)
   })
@@ -305,7 +356,8 @@ export const register: Register = on => {
     const pcOutput = w.localOutput + l.rate
     const pcSessions = Math.max(w.localSessions, isStreaming ? 1 : 0)
     // The account's own reading is the fresher one and counts every client.
-    const limits = w.accountLimits ?? snap?.limits ?? []
+    const limits = (w.accountLimits ?? snap?.limits ?? []).map(lim => current(lim, at))
+    const isStale = w.accountError !== null || (w.accountAt !== null && at - w.accountAt > STALE_MS)
     const perFive = calib.five_hour?.perPercent
     // The account's rate cannot be under this machine's over the same span.
     const accountRate =
@@ -350,7 +402,7 @@ export const register: Register = on => {
       </Box>
     )
 
-    const limitBlock = (lim: Limit) => {
+    const limitBlock = (lim: Limit & { isReset: boolean }) => {
       const cal = calib[lim.kind]
       const color = tone(lim.percentUsed)
       const capacity = cal ? cal.perPercent * 100 : 0
@@ -385,7 +437,11 @@ export const register: Register = on => {
                 : 'équivalent tokens : calibrage en cours…'}
             </Text>
           )}
-          {lim.resetsAt && <Text dimColor>remise à zéro dans {fmtReset(lim.resetsAt, at)}</Text>}
+          {lim.isReset ? (
+            <Text color="success">remise à zéro effectuée · nouveau relevé en cours</Text>
+          ) : (
+            lim.resetsAt && <Text dimColor>remise à zéro dans {fmtReset(lim.resetsAt, at)}</Text>
+          )}
         </Box>
       )
     }
@@ -524,14 +580,29 @@ export const register: Register = on => {
         {limits.length > 0 &&
           card(
             "LIMITES D'ABONNEMENT",
-            <Text dimColor>en tokens ≈</Text>,
+            w.accountAt !== null ? (
+              <Text color={isStale ? 'warning' : 'inactive'}>relevé {ago(at - w.accountAt)}</Text>
+            ) : (
+              <Text dimColor>en tokens ≈</Text>
+            ),
             <Box flexDirection="column">
+              {isStale && (
+                <Box marginBottom={1}>
+                  <Text color="warning">
+                    {w.accountError
+                      ? `Dernier relevé du compte en échec (${w.accountError}) : chiffres du relevé précédent, nouvel essai automatique.`
+                      : 'Relevé du compte en retard : nouvel essai automatique.'}
+                  </Text>
+                </Box>
+              )}
               {limits.map(limitBlock)}
               <Text dimColor size="caption">
-                % relevés auprès du compte chaque minute. Équivalents en tokens d'après ce que ce PC a consommé depuis
-                l'ouverture de chaque fenêtre : si d'autres appareils consomment aussi, ils sont sous-estimés.
+                % relevés auprès du compte chaque minute, et juste après chaque remise à zéro. Équivalents en tokens
+                d'après ce que ce PC a consommé depuis l'ouverture de chaque fenêtre : si d'autres appareils consomment
+                aussi, ils sont sous-estimés.
               </Text>
             </Box>,
+            isStale ? 'warning' : 'subtle',
           )}
       </Box>
     )

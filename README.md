@@ -42,9 +42,19 @@ Le panneau s'ouvre au démarrage de chaque session. Si tu le fermes, la commande
 Le script `scripts/conso-watch.py` fait les relevés :
 
 - il lit les journaux de Claude Code dans `~/.claude/projects` (ou `$CLAUDE_CONFIG_DIR/projects`) ;
-- toutes les minutes, il interroge `https://api.anthropic.com/api/oauth/usage` avec le jeton de connexion de Claude Code (`~/.claude/.credentials.json`), pour lire les pourcentages des limites.
+- toutes les minutes, et quelques secondes après chaque remise à zéro d'une fenêtre, il interroge `https://api.anthropic.com/api/oauth/usage` avec le jeton de connexion de Claude Code (`~/.claude/.credentials.json`), pour lire les pourcentages des limites.
 
-Le jeton n'est envoyé qu'à `api.anthropic.com`. Le plugin n'écrit rien d'autre que son propre stockage Claude Code, qui garde les équivalents en tokens des limites.
+Chaque session lance son propre relevé, mais un seul interroge le compte à la fois : la réponse est partagée par un fichier de cache, `~/.cache/conso-live/usage.json`. Dix sessions ouvertes font donc autant d'appels qu'une seule, ce qui évite d'être limité par l'API. Si un relevé échoue, le panneau garde les derniers chiffres, l'indique en orange et réessaie tout seul. Si le script s'arrête, il est relancé automatiquement.
+
+Le jeton n'est envoyé qu'à `api.anthropic.com`. Le plugin n'écrit rien d'autre que ce cache et son propre stockage Claude Code, qui garde les équivalents en tokens des limites.
+
+## Mise à jour
+
+```bash
+claude plugin update conso-live@conso-live
+```
+
+Puis `/reload-plugins` dans les sessions ouvertes.
 
 ## Licence
 

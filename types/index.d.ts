@@ -39,13 +39,18 @@ export type Wide = {
   // Every limit window as the account reported it a minute ago at most,
   // every client of the account counted; null before the first reading.
   accountLimits: Limit[] | null
+  // When the account was last read (ms), the limits above with it.
+  accountAt: number | null
   // The five-hour window's percent per minute over the last minutes, and
   // this machine's tokens per second over the same span; null until enough
   // readings.
   accountSlope: number | null
   localSpanRate: number | null
+  // Why the last reading of the account failed; the limits are then stale.
   accountError: string | null
   isRunning: boolean
+  // The watcher now running, so one that ended late cannot mark it stopped.
+  runner: string
 }
 
 declare module 'claude-code' {
