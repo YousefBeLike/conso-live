@@ -1,6 +1,6 @@
 {
   "name": "conso-live",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Panneau de consommation Claude en direct : limites 5 h et hebdo, tokens consommés, contexte et coût",
   "author": {
     "name": "YousefBeLike",

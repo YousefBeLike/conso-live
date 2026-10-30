@@ -28,7 +28,7 @@ export type Live = {
 // `weight` is how many percent points the figure was learnt over.
 export type Calibration = Record<string, { perPercent: number; weight: number }>
 
-// The account's use beyond this session, as bin/conso-watch.py reports it.
+// The account's use beyond this session, as scripts/conso-watch.py reports it.
 export type Wide = {
   // Every Claude Code session on this machine, exact, smoothed over about 15 s.
   localTotal: number

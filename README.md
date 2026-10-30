@@ -39,7 +39,7 @@ Le panneau s'ouvre au démarrage de chaque session. Si tu le fermes, la commande
 
 ## Données et réseau
 
-Le script `bin/conso-watch.py` fait les relevés :
+Le script `scripts/conso-watch.py` fait les relevés :
 
 - il lit les journaux de Claude Code dans `~/.claude/projects` (ou `$CLAUDE_CONFIG_DIR/projects`) ;
 - toutes les minutes, il interroge `https://api.anthropic.com/api/oauth/usage` avec le jeton de connexion de Claude Code (`~/.claude/.credentials.json`), pour lire les pourcentages des limites.

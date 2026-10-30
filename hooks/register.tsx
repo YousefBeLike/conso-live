@@ -162,10 +162,10 @@ async function calibrate($: EngineInterface, limits: Limit[]) {
   await $.store.set('calibration', next)
 }
 
-// Runs bin/conso-watch.py for as long as the module is loaded and folds each
+// Runs scripts/conso-watch.py for as long as the module is loaded and folds each
 // line it prints into `wide`.
 async function watch($: EngineInterface) {
-  const watcher = $.process.spawn({ argv: ['python3', '-I', `${$.plugin.root}/bin/conso-watch.py`] })
+  const watcher = $.process.spawn({ argv: ['python3', '-I', `${$.plugin.root}/scripts/conso-watch.py`] })
   let pending = ''
 
   await update($, wide, w => ({ ...w, isRunning: true }))
