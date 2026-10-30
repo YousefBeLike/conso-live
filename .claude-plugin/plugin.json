@@ -1,0 +1,7 @@
+{
+  "name": "conso-live",
+  "version": "0.1.0",
+  "description": "Panneau de consommation Claude en direct : limites 5 h et hebdo, tokens consommés, contexte et coût",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
