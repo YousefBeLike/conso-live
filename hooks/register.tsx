@@ -80,19 +80,56 @@ const sumTokens = (t: Totals) => t.input + t.output + t.cacheRead + t.cacheWrite
 
 const tone = (percent: number): Color => (percent >= 90 ? 'error' : percent >= 70 ? 'warning' : 'success')
 
-// The band's meters are drawn as images on the desktop, where theme names do
-// not reach: Claude's own orange, and amber and red past the same thresholds,
-// over a grey that reads on the light and the dark theme alike.
-const METER_HEX = (percent: number) => (percent >= 90 ? '#C6463D' : percent >= 70 ? '#C98A1B' : '#D97757')
-const METER_COLOR = (percent: number): Color => (percent >= 90 ? 'error' : percent >= 70 ? 'warning' : 'claude')
+// The band's donuts are drawn as images on the desktop, where theme names do
+// not reach. Each measure has a hue of its own, calm on the light and the dark
+// theme alike; a limit turns amber past 75 % and red past 90 %.
+const DONUT = 26
+const HUES: Record<string, { hex: string; theme: Color }> = {
+  five_hour: { hex: '#D97757', theme: 'claude' },
+  seven_day: { hex: '#6A9BCC', theme: 'suggestion' },
+  seven_day_opus: { hex: '#9C8AD1', theme: 'merged' },
+  seven_day_sonnet: { hex: '#5FA8A0', theme: 'ide' },
+  context: { hex: '#8CAF6E', theme: 'success' },
+}
+const PART_HEX: Record<keyof Omit<Totals, 'requests'>, string> = {
+  output: '#D97757',
+  input: '#8CAF6E',
+  cacheWrite: '#9C8AD1',
+  cacheRead: '#6A9BCC',
+}
 
-const meterSvg = (percent: number, width: number, height: number) => {
-  const fill = Math.round((Math.min(100, Math.max(0, percent)) / 100) * width)
-  const r = height / 2
+type Segment = { share: number; hex: string; theme: Color }
+
+const gauge = (percent: number, kind: string): Segment => {
+  const hue = HUES[kind] ?? { hex: '#6A9BCC', theme: 'suggestion' as Color }
+  const share = Math.min(100, Math.max(0, percent)) / 100
+  return percent >= 90
+    ? { share, hex: '#D9534F', theme: 'error' }
+    : percent >= 75
+      ? { share, hex: '#D4A23B', theme: 'warning' }
+      : { share, ...hue }
+}
+
+// Segments one after the other round a ring, from twelve o'clock.
+const donutSvg = (segments: Segment[], size = DONUT * 2, stroke = 7) => {
+  const c = size / 2
+  const r = c - stroke / 2
+  const round = 2 * Math.PI * r
+  let offset = 0
+  let arcs = ''
+  for (const s of segments) {
+    const length = round * Math.min(1, Math.max(0, s.share))
+    if (length <= 0) continue
+    arcs +=
+      `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${s.hex}" stroke-width="${stroke}" ` +
+      `stroke-dasharray="${length} ${round - length}" stroke-dashoffset="${-offset}" ` +
+      `stroke-linecap="${segments.length === 1 ? 'round' : 'butt'}" transform="rotate(-90 ${c} ${c})"/>`
+    offset += length
+  }
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
-    `<rect width="${width}" height="${height}" rx="${r}" fill="#8B857C" fill-opacity="0.28"/>` +
-    (fill > 0 ? `<rect width="${Math.max(fill, height)}" height="${height}" rx="${r}" fill="${METER_HEX(percent)}"/>` : '') +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
+    `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="#8B857C" stroke-opacity="0.25" stroke-width="${stroke}"/>` +
+    arcs +
     '</svg>'
   )
 }
@@ -368,9 +405,8 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The widget above the prompt, as a bento: this discussion's tokens in the
-  // wide tile, a tile per limit and one for the context, and a footer line
-  // with the machine's rate, the account's reading and the details.
+  // The widget above the prompt: one quiet row of small donuts, each with its
+  // name and figure beside it, borderless like the app's own controls.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const table = $.ui.resolve(e)
@@ -383,7 +419,8 @@ export const register: Register = on => {
     const w = await read($, wide)
     const at = (await read($, now)) || Date.now()
     const isStreaming = l.streams > 0
-    const total = sumTokens(t) + l.estimate
+    const parts = { ...t, output: t.output + l.estimate }
+    const total = sumTokens(parts)
     const pcRate = w.localTotal + l.rate
     const isStale = w.accountError !== null || (w.accountAt !== null && at - w.accountAt > STALE_MS)
     const limits = (w.accountLimits ?? snap?.limits ?? [])
@@ -391,120 +428,76 @@ export const register: Register = on => {
       // The two windows everyone has, and a model's own week once it bites.
       .filter(lim => lim.kind === 'five_hour' || lim.kind === 'seven_day' || (lim.kind.startsWith('seven_day_') && lim.percentUsed >= 50))
 
-    const meter = (percent: number) =>
+    // A donut on the desktop; on the terminal, a glyph filled by quarters.
+    const donut = (segments: Segment[], percent: number, alt: string) =>
       Svg ? (
-        <Svg source={meterSvg(percent, 132, 6)} alt={`${percent} %`} width={132} height={6} />
+        <Svg source={donutSvg(segments)} alt={alt} width={DONUT} height={DONUT} />
       ) : (
-        <Text mono>
-          <Text color={METER_COLOR(percent)}>{'━'.repeat(Math.round(Math.min(100, Math.max(0, percent)) / 6.25))}</Text>
-          <Text color="subtle">{'━'.repeat(16 - Math.round(Math.min(100, Math.max(0, percent)) / 6.25))}</Text>
-        </Text>
+        <Text color={segments[0]?.theme ?? 'subtle'}>{'○◔◑◕●'[Math.round(Math.min(100, Math.max(0, percent)) / 25)]}</Text>
       )
 
-    // One tile: its name and an aside on top, the figure, then what it means.
-    const tile = (key: string, label: string, aside: JSX.Element | null, body: JSX.Element[], grow = 1) => (
-      <Box
-        key={key}
-        flexDirection="column"
-        flexGrow={grow}
-        flexShrink={1}
-        minWidth={24}
-        borderStyle="round"
-        borderColor={key === 'session' && isStreaming ? 'claude' : 'subtle'}
-        paddingX={1}
-      >
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
-          <Text size="caption" weight="medium" dimColor>
+    const stat = (key: string, ring: JSX.Element, label: string, value: string, detail: string) => (
+      <Box key={key} flexDirection="row" alignItems="center" gap={1}>
+        {ring}
+        <Box flexDirection="column">
+          <Text size="caption" dimColor>
             {label}
           </Text>
-          {aside}
+          <Text size="footnote" tabular>
+            <Text weight="semibold">{value}</Text>
+            {detail ? <Text dimColor> {detail}</Text> : ''}
+          </Text>
         </Box>
-        {body}
       </Box>
     )
 
-    const SHORT_LABELS: Record<string, string> = { five_hour: 'Fenêtre 5 h', seven_day: 'Semaine' }
+    const SHORT_LABELS: Record<string, string> = { five_hour: '5 h', seven_day: 'Semaine' }
 
     return (
-      <Box flexDirection="column" paddingX={1}>
-        <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
-          {tile(
-            'session',
-            'Cette discussion',
-            isStreaming ? (
-              <Text size="caption" color="claude" weight="medium">
-                ● en direct
-              </Text>
-            ) : (
-              <Text size="caption" color="inactive">
-                ○ en attente
-              </Text>
-            ),
-            [
-              <Text size="heading" weight="semibold" tabular>
-                {full(total)}
-                <Text size="footnote" dimColor weight="regular">
-                  {' '}tokens
-                </Text>
-              </Text>,
-              <Text size="footnote" color={isStreaming ? 'claude' : undefined} dimColor={!isStreaming} tabular>
-                {isStreaming
-                  ? `+${full(l.estimate)} en cours · ${full(l.rate)} tok/s`
-                  : `${t.requests} requête${t.requests > 1 ? 's' : ''}${snap?.costUsd !== undefined ? ` · ${snap.costUsd.toFixed(2).replace('.', ',')} $ API` : ''}`}
-              </Text>,
-            ],
-            2,
+      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} rowGap={1} paddingX={1}>
+        {stat(
+          'session',
+          donut(
+            total > 0 ? PARTS.map(p => ({ share: parts[p.key] / total, hex: PART_HEX[p.key], theme: p.color })) : [],
+            100,
+            'Répartition des tokens de la discussion',
+          ),
+          isStreaming ? '● Discussion, en direct' : 'Discussion',
+          full(total),
+          isStreaming ? `+${full(l.estimate)} · ${full(l.rate)} tok/s` : 'tokens',
+        )}
+
+        {limits.map(lim => {
+          const figures = inTokens(lim, calib, w)
+          const reset = lim.isReset ? 'remis à zéro' : lim.resetsAt ? `↻ ${fmtReset(lim.resetsAt, at)}` : ''
+          return stat(
+            lim.kind,
+            donut([gauge(lim.percentUsed, lim.kind)], lim.percentUsed, `${lim.percentUsed} %`),
+            [SHORT_LABELS[lim.kind] ?? LABELS[lim.kind] ?? lim.kind, reset].filter(Boolean).join(' · '),
+            `${lim.percentUsed} %`,
+            figures ? `${short(figures.left)} restants` : '',
+          )
+        })}
+
+        {snap?.contextTokens !== undefined &&
+          stat(
+            'context',
+            donut([gauge(snap.contextPercent ?? 0, 'context')], snap.contextPercent ?? 0, `${snap.contextPercent ?? 0} %`),
+            'Contexte',
+            `${snap.contextPercent ?? 0} %`,
+            `${short(snap.contextTokens)} / ${short(snap.contextWindow)}`,
           )}
 
-          {limits.map(lim => {
-            const figures = inTokens(lim, calib, w)
-            return tile(
-              lim.kind,
-              SHORT_LABELS[lim.kind] ?? LABELS[lim.kind] ?? lim.kind,
-              <Text size="caption" dimColor tabular>
-                {lim.isReset ? 'remis à zéro' : lim.resetsAt ? `↻ ${fmtReset(lim.resetsAt, at)}` : ''}
-              </Text>,
-              [
-                <Text size="heading" weight="semibold" color={METER_COLOR(lim.percentUsed)} tabular>
-                  {lim.percentUsed} %
-                </Text>,
-                meter(lim.percentUsed),
-                <Text size="footnote" dimColor tabular>
-                  {figures ? `≈ ${short(figures.left)} restants sur ${short(figures.capacity)}` : 'calibrage en cours…'}
-                </Text>,
-              ],
-            )
-          })}
-
-          {snap?.contextTokens !== undefined &&
-            tile(
-              'context',
-              'Contexte',
-              null,
-              [
-                <Text size="heading" weight="semibold" color={METER_COLOR(snap.contextPercent ?? 0)} tabular>
-                  {snap.contextPercent ?? 0} %
-                </Text>,
-                meter(snap.contextPercent ?? 0),
-                <Text size="footnote" dimColor tabular>
-                  {short(snap.contextTokens)} / {short(snap.contextWindow)}
-                </Text>,
-              ],
-            )}
-        </Box>
-
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginTop={1} gap={2}>
-          <Text size="caption" dimColor tabular>
-            Ce PC {full(pcRate)} tok/s · {Math.max(w.localSessions, isStreaming ? 1 : 0)} discussion
-            {Math.max(w.localSessions, isStreaming ? 1 : 0) > 1 ? 's' : ''} active
-            {Math.max(w.localSessions, isStreaming ? 1 : 0) > 1 ? 's' : ''}
-            {w.accountAt !== null ? ` · compte relevé ${ago(at - w.accountAt)}` : ''}
-          </Text>
-          {isStale && (
+        <Box flexGrow={1} flexDirection="row" justifyContent="flex-end" alignItems="center" gap={2}>
+          {isStale ? (
             <Text size="caption" color="warning">
-              {w.accountError === 'http-429' ? 'API du compte saturée, nouvel essai auto' : 'relevé du compte en retard'}
+              ● compte en attente
             </Text>
-          )}
+          ) : pcRate >= 1 ? (
+            <Text size="caption" dimColor tabular>
+              Ce PC {full(pcRate)} tok/s
+            </Text>
+          ) : null}
           <Button key="details" plain dimColor label="Détails ›" onPress={() => void $.ui.open({ id: PANE, title: TITLE })} />
         </Box>
       </Box>

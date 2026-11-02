@@ -16,7 +16,7 @@ const BAND = {
 test('the band draws on the terminal and the desktop', async $ => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...BAND, surface })
-    expect((await ui.find({ type: 'Text', text: /Cette discussion/ }))?.text).toBe('Cette discussion')
+    expect((await ui.find({ type: 'Text', text: /^Discussion$/ }))?.text).toBe('Discussion')
     expect(await ui.find({ type: 'Button', key: 'details' })).toBeTruthy()
     await ui.unmount()
   }

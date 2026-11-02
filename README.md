@@ -4,14 +4,14 @@ Plugin Claude Code : un widget au-dessus de la zone de saisie qui affiche ta con
 
 ## Le widget
 
-Une grille de tuiles (style bento) au-dessus de la barre d'écriture, au style de Claude Desktop :
+Une ligne discrète au-dessus de la barre d'écriture, sans cadre, au style de Claude Desktop. Chaque mesure a un petit donut qui se remplit, avec son nom et son chiffre à côté :
 
-- **Cette discussion**, la tuile large : le total de tokens, qui défile pendant que Claude écrit, avec le débit en tok/s, ou le nombre de requêtes et le coût équivalent API au repos ;
-- **Fenêtre 5 h** et **Semaine** : le pourcentage, une jauge, les tokens restants estimés sur le total, et le temps avant la remise à zéro (les limites Opus ou Sonnet de la semaine s'ajoutent quand elles passent 50 %) ;
+- **Discussion** : le total de tokens, qui défile pendant que Claude écrit, avec le débit en tok/s. Son donut montre la répartition entre sortie, entrée, cache écrit et cache lu ;
+- **5 h** et **Semaine** : le pourcentage, les tokens restants estimés et le temps avant la remise à zéro (les limites Opus ou Sonnet de la semaine s'ajoutent quand elles passent 50 %) ;
 - **Contexte** : le remplissage de la fenêtre de contexte, en tokens ;
-- en pied : le débit de tous les Claude Code de la machine, le nombre de discussions actives, l'âge du dernier relevé du compte, et **Détails ›**, qui ouvre le panneau complet.
+- à droite : le débit du PC quand Claude travaille, et **Détails ›**, qui ouvre le panneau complet.
 
-Les jauges passent à l'ambre à 70 % et au rouge à 90 %. Les tuiles passent à la ligne quand la fenêtre est étroite. Le `[-]` à droite du widget le replie.
+Chaque mesure a sa couleur (orange pour 5 h, bleu pour la semaine, vert pour le contexte) ; une limite passe à l'ambre à 75 % et au rouge à 90 %. Le `[-]` à droite du widget le replie.
 
 ## Le panneau de détail
 
