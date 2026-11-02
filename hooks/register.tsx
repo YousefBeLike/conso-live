@@ -78,7 +78,6 @@ const toSnapshot = (u: SessionUsage | SessionMeasureInput): Snapshot => ({
 
 const sumTokens = (t: Totals) => t.input + t.output + t.cacheRead + t.cacheWrite
 
-const tone = (percent: number): Color => (percent >= 90 ? 'error' : percent >= 70 ? 'warning' : 'success')
 
 // The band's donuts are drawn as images on the desktop, where theme names do
 // not reach. Each measure has a hue of its own, calm on the light and the dark
@@ -504,15 +503,18 @@ export const register: Register = on => {
     )
   })
 
+  // The details, in the band's language: sections under a small heading, no
+  // frames, a donut beside each figure, the same hue for the same measure.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const table = $.ui.resolve(e)
+    const { Box, Text } = table
+    const Svg = 'Svg' in table ? table.Svg : undefined
     const snap = await read($, snapshot)
     const t = await read($, totals)
     const l = await read($, live)
     const calib = await read($, calibration)
     const w = await read($, wide)
     const at = (await read($, now)) || Date.now()
-    const width = Math.max(16, Math.min(44, (e.viewport?.columns ?? 40) - 8))
     const isStreaming = l.streams > 0
     const parts = { ...t, output: t.output + l.estimate }
     const total = sumTokens(parts)
@@ -530,35 +532,17 @@ export const register: Register = on => {
         ? Math.max((w.accountSlope * perFive) / 60, w.localSpanRate ?? 0)
         : null
 
-    const bar = (percent: number, color: Color) => {
-      const filled = Math.round((Math.min(100, Math.max(0, percent)) / 100) * width)
-      return (
-        <Text mono>
-          <Text color={color}>{'━'.repeat(filled)}</Text>
-          <Text color="subtle">{'━'.repeat(width - filled)}</Text>
-        </Text>
+    const donut = (segments: Segment[], percent: number, px: number, alt: string) =>
+      Svg ? (
+        <Svg source={donutSvg(segments, px * 2, Math.round(px * 0.27))} alt={alt} width={px} height={px} />
+      ) : (
+        <Text color={segments[0]?.theme ?? 'subtle'}>{'○◔◑◕●'[Math.round(Math.min(100, Math.max(0, percent)) / 25)]}</Text>
       )
-    }
 
-    // One bar split by where the tokens went, each part at least a cell when present.
-    const composition = () => {
-      if (total === 0) return <Text color="subtle" mono>{'━'.repeat(width)}</Text>
-      const cells = PARTS.map(p => (parts[p.key] > 0 ? Math.max(1, Math.round((parts[p.key] / total) * width)) : 0))
-      const largest = cells.indexOf(Math.max(...cells))
-      cells[largest] = (cells[largest] ?? 0) + width - cells.reduce((a, b) => a + b, 0)
-      return (
-        <Text mono>
-          {PARTS.map((p, i) => (
-            <Text color={p.color}>{'━'.repeat(Math.max(0, cells[i] ?? 0))}</Text>
-          ))}
-        </Text>
-      )
-    }
-
-    const card = (title: string, aside: JSX.Element | null, body: JSX.Element, accent: Color = 'subtle') => (
-      <Box flexDirection="column" borderStyle="round" borderColor={accent} paddingX={1} marginBottom={1}>
-        <Box justifyContent="space-between" marginBottom={1}>
-          <Text dimColor weight="semibold">
+    const section = (title: string, aside: JSX.Element | null, body: JSX.Element) => (
+      <Box flexDirection="column" marginBottom={2}>
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginBottom={1}>
+          <Text size="caption" weight="medium" dimColor>
             {title}
           </Text>
           {aside}
@@ -567,208 +551,223 @@ export const register: Register = on => {
       </Box>
     )
 
-    const limitBlock = (lim: Limit & { isReset: boolean }) => {
-      const cal = calib[lim.kind]
-      const color = tone(lim.percentUsed)
+    // A label on the left, its figure on the right.
+    const line = (label: JSX.Element | string, value: JSX.Element | string) => (
+      <Box flexDirection="row" justifyContent="space-between" gap={1}>
+        {typeof label === 'string' ? (
+          <Text size="footnote" dimColor>
+            {label}
+          </Text>
+        ) : (
+          label
+        )}
+        {typeof value === 'string' ? (
+          <Text size="footnote" tabular>
+            {value}
+          </Text>
+        ) : (
+          value
+        )}
+      </Box>
+    )
+
+    const limitRow = (lim: Limit & { isReset: boolean }) => {
       const figures = inTokens(lim, calib, w)
-      const capacity = figures?.capacity ?? 0
-      const used = figures?.used ?? 0
+      const reset = lim.isReset ? 'remis à zéro, nouveau relevé…' : lim.resetsAt ? `↻ dans ${fmtReset(lim.resetsAt, at)}` : ''
       return (
-        <Box flexDirection="column" marginBottom={1}>
-          <Box justifyContent="space-between">
-            <Text weight="semibold">{LABELS[lim.kind] ?? lim.kind}</Text>
-            <Text color={color} weight="bold">
-              {lim.percentUsed} %
-            </Text>
-          </Box>
-          {bar(lim.percentUsed, color)}
-          {cal ? (
-            <Box justifyContent="space-between">
-              <Text>
-                <Text weight="semibold">≈ {short(used)}</Text>
-                <Text dimColor> / {short(capacity)}</Text>
+        <Box key={lim.kind} flexDirection="row" alignItems="center" gap={2} marginBottom={1}>
+          {donut([gauge(lim.percentUsed, lim.kind)], lim.percentUsed, 36, `${lim.percentUsed} %`)}
+          <Box flexDirection="column" flexGrow={1}>
+            <Box flexDirection="row" justifyContent="space-between" gap={1}>
+              <Text size="footnote" weight="medium">
+                {LABELS[lim.kind] ?? lim.kind}
               </Text>
-              <Text>
-                <Text dimColor>reste </Text>
-                <Text color={color} weight="bold">
-                  ≈ {short(Math.max(0, capacity - used))}
-                </Text>
+              <Text size="caption" dimColor tabular>
+                {reset}
               </Text>
             </Box>
-          ) : (
-            <Text dimColor>
-              {w.isRunning && Object.keys(calib).length > 0
-                ? 'pas encore de tokens comptés pour cette limite'
-                : 'équivalent tokens : calibrage en cours…'}
+            <Text size="footnote" tabular>
+              <Text weight="semibold">{lim.percentUsed} %</Text>
+              <Text dimColor>
+                {figures
+                  ? ` · ≈ ${short(figures.used)} / ${short(figures.capacity)} · reste ${short(figures.left)}`
+                  : w.isRunning && Object.keys(calib).length > 0
+                    ? ' · pas encore de tokens comptés'
+                    : ' · calibrage en cours…'}
+              </Text>
             </Text>
-          )}
-          {lim.isReset ? (
-            <Text color="success">remise à zéro effectuée · nouveau relevé en cours</Text>
-          ) : (
-            lim.resetsAt && <Text dimColor>remise à zéro dans {fmtReset(lim.resetsAt, at)}</Text>
-          )}
+          </Box>
         </Box>
       )
     }
 
     return (
-      <Box flexDirection="column">
-        {card(
-          'CETTE DISCUSSION',
+      <Box flexDirection="column" paddingX={1}>
+        {section(
+          'Cette discussion',
           isStreaming ? (
-            <Text color="success" weight="semibold">
-              ● EN DIRECT
+            <Text size="caption" color="claude" weight="medium">
+              ● en direct
             </Text>
           ) : (
-            <Text color="inactive">○ en attente</Text>
+            <Text size="caption" color="inactive">
+              ○ en attente
+            </Text>
           ),
           <Box flexDirection="column">
-            <Text size="title" weight="bold" color="claude" mono>
-              {full(total)}
-            </Text>
-            <Text color={isStreaming ? 'success' : 'inactive'}>
-              {isStreaming
-                ? `+${full(l.estimate)} en cours · ${full(l.rate)} tok/s générés${l.streams > 1 ? ` · ${l.streams} flux` : ''}`
-                : '0 tok/s générés'}
-            </Text>
-            <Text dimColor>
-              {t.requests} requête{t.requests > 1 ? 's' : ''}
-              {snap?.costUsd !== undefined ? ` · ${snap.costUsd.toFixed(2).replace('.', ',')} $ équivalent API (fin de tour)` : ''}
-            </Text>
-            <Box marginY={1}>{composition()}</Box>
-            {PARTS.map(p => (
-              <Box justifyContent="space-between">
-                <Text>
-                  <Text color={p.color}>■ </Text>
-                  <Text dimColor>{p.label}</Text>
+            <Box flexDirection="row" alignItems="center" gap={2} marginBottom={1}>
+              {donut(
+                total > 0 ? PARTS.map(p => ({ share: parts[p.key] / total, hex: PART_HEX[p.key], theme: p.color })) : [],
+                100,
+                48,
+                'Répartition des tokens de la discussion',
+              )}
+              <Box flexDirection="column">
+                <Text size="heading" weight="semibold" tabular>
+                  {full(total)}
+                  <Text size="footnote" weight="regular" dimColor>
+                    {' '}tokens
+                  </Text>
                 </Text>
-                <Text mono>
-                  {full(parts[p.key])}
-                  <Text dimColor> {total > 0 ? `${String(Math.round((parts[p.key] / total) * 100)).padStart(3)} %` : '  – %'}</Text>
+                <Text size="footnote" color={isStreaming ? 'claude' : undefined} dimColor={!isStreaming} tabular>
+                  {isStreaming
+                    ? `+${full(l.estimate)} en cours · ${full(l.rate)} tok/s${l.streams > 1 ? ` · ${l.streams} flux` : ''}`
+                    : `${t.requests} requête${t.requests > 1 ? 's' : ''}${snap?.costUsd !== undefined ? ` · ${snap.costUsd.toFixed(2).replace('.', ',')} $ équivalent API` : ''}`}
                 </Text>
               </Box>
-            ))}
+            </Box>
+            {PARTS.map(p =>
+              line(
+                <Text size="footnote">
+                  <Text color={p.color}>● </Text>
+                  <Text dimColor>{p.label}</Text>
+                </Text>,
+                <Text size="footnote" tabular>
+                  {full(parts[p.key])}
+                  <Text dimColor> {total > 0 ? `${String(Math.round((parts[p.key] / total) * 100)).padStart(3)} %` : '  – %'}</Text>
+                </Text>,
+              ),
+            )}
           </Box>,
-          isStreaming ? 'claude' : 'subtle',
         )}
 
-        {card(
-          'TOUTES DISCUSSIONS',
+        {limits.length > 0 &&
+          section(
+            "Limites d'abonnement",
+            w.accountAt !== null ? (
+              <Text size="caption" color={isStale ? 'warning' : 'inactive'}>
+                {isStale ? '● ' : ''}relevé {ago(at - w.accountAt)}
+              </Text>
+            ) : null,
+            <Box flexDirection="column">
+              {limits.map(limitRow)}
+              {isStale && (
+                <Text size="caption" color="warning">
+                  {w.accountError === 'http-429'
+                    ? "L'API du compte est saturée : chiffres du dernier relevé, nouvel essai automatique."
+                    : w.accountError
+                      ? `Relevé du compte en échec (${w.accountError}) : chiffres du dernier relevé, nouvel essai automatique.`
+                      : 'Relevé du compte en retard : nouvel essai automatique.'}
+                </Text>
+              )}
+              <Text size="caption" dimColor>
+                Équivalents en tokens d'après ce que ce PC a consommé depuis l'ouverture de chaque fenêtre : si d'autres
+                appareils consomment aussi, ils sont sous-estimés.
+              </Text>
+            </Box>,
+          )}
+
+        {section(
+          'Contexte',
+          null,
+          snap?.contextTokens !== undefined ? (
+            <Box flexDirection="row" alignItems="center" gap={2}>
+              {donut([gauge(snap.contextPercent ?? 0, 'context')], snap.contextPercent ?? 0, 36, `${snap.contextPercent ?? 0} %`)}
+              <Box flexDirection="column">
+                <Text size="footnote" tabular>
+                  <Text weight="semibold">{snap.contextPercent ?? 0} %</Text>
+                  <Text dimColor>
+                    {' '}· {short(snap.contextTokens)} / {short(snap.contextWindow)}
+                  </Text>
+                </Text>
+                <Text size="caption" dimColor tabular>
+                  reste {short(Math.max(0, snap.contextWindow - snap.contextTokens))} dans la fenêtre
+                </Text>
+              </Box>
+            </Box>
+          ) : (
+            <Text size="footnote" dimColor>
+              en attente de la première réponse
+            </Text>
+          ),
+        )}
+
+        {section(
+          'Toutes les discussions',
           pcTotal >= 1 ? (
-            <Text color="success" weight="semibold">
-              ● ACTIF
+            <Text size="caption" color="claude" weight="medium">
+              ● actif
             </Text>
           ) : (
-            <Text color="inactive">{w.isRunning ? '○ calme' : '○ arrêté'}</Text>
+            <Text size="caption" color="inactive">
+              {w.isRunning ? '○ calme' : '○ arrêté'}
+            </Text>
           ),
           <Box flexDirection="column">
-            <Box justifyContent="space-between">
-              <Text weight="semibold">Ce PC</Text>
-              <Text>
-                <Text weight="bold" color={pcTotal >= 1 ? 'claude' : undefined} mono>
-                  {full(pcTotal)}
-                </Text>
+            {line(
+              <Text size="footnote" weight="medium">
+                Ce PC
+              </Text>,
+              <Text size="footnote" tabular>
+                <Text weight="semibold">{full(pcTotal)}</Text>
                 <Text dimColor> tok/s</Text>
-              </Text>
-            </Box>
-            <Text dimColor>
+              </Text>,
+            )}
+            <Text size="caption" dimColor tabular>
               dont {full(pcOutput)} tok/s générés · {pcSessions} discussion{pcSessions > 1 ? 's' : ''} active
               {pcSessions > 1 ? 's' : ''}
             </Text>
-            {(['five_hour', 'seven_day'] as const).map(kind => {
-              const figures = w.windows[kind]
-              return (
-                <Box justifyContent="space-between">
-                  <Text dimColor>{kind === 'five_hour' ? 'Consommé, fenêtre 5 h' : 'Consommé, semaine'}</Text>
-                  <Text mono>
+            <Box flexDirection="column" marginY={1}>
+              {(['five_hour', 'seven_day'] as const).map(kind => {
+                const figures = w.windows[kind]
+                return line(
+                  <Text size="footnote">
+                    <Text color={HUES[kind]?.theme}>● </Text>
+                    <Text dimColor>{kind === 'five_hour' ? 'Consommé, fenêtre 5 h' : 'Consommé, semaine'}</Text>
+                  </Text>,
+                  <Text size="footnote" tabular>
                     {figures ? full(figures.total) : '–'}
-                    <Text dimColor>{figures ? ` (${short(figures.output)} générés)` : ''}</Text>
-                  </Text>
-                </Box>
-              )
-            })}
-
-            <Box justifyContent="space-between" marginTop={1}>
-              <Text weight="semibold">Compte entier</Text>
-              {accountRate === null ? (
-                <Text dimColor>en attente</Text>
+                    <Text dimColor>{figures ? ` · ${short(figures.output)} générés` : ''}</Text>
+                  </Text>,
+                )
+              })}
+            </Box>
+            {line(
+              <Text size="footnote" weight="medium">
+                Compte entier
+              </Text>,
+              accountRate === null ? (
+                <Text size="footnote" dimColor>
+                  en attente
+                </Text>
               ) : (
-                <Text>
-                  <Text weight="bold" color="claude" mono>
-                    ≈ {full(accountRate)}
-                  </Text>
+                <Text size="footnote" tabular>
+                  <Text weight="semibold">≈ {full(accountRate)}</Text>
                   <Text dimColor> tok/s</Text>
                 </Text>
-              )}
-            </Box>
-            <Text dimColor>
+              ),
+            )}
+            <Text size="caption" dimColor>
               {w.accountError
-                ? `mesure du compte indisponible (${w.accountError})`
+                ? 'mesure du compte indisponible pour le moment'
                 : perFive === undefined
                   ? 'en attente du calibrage de la fenêtre 5 h'
                   : w.accountSlope === null
                     ? 'premières mesures : il faut 5 min de relevés'
-                    : `moyenne 5 à 15 min, dont ce PC ${full(w.localSpanRate ?? 0)} tok/s · claude.ai, VPS, autres PC compris`}
+                    : `moyenne sur 5 à 15 min, dont ce PC ${full(w.localSpanRate ?? 0)} tok/s · claude.ai, VPS et autres PC compris`}
             </Text>
           </Box>,
-          pcTotal >= 1 ? 'claude' : 'subtle',
         )}
-
-        {card(
-          'CONTEXTE',
-          snap?.contextPercent !== undefined ? (
-            <Text color={tone(snap.contextPercent)} weight="bold">
-              {snap.contextPercent} %
-            </Text>
-          ) : null,
-          snap?.contextTokens !== undefined ? (
-            <Box flexDirection="column">
-              {bar(snap.contextPercent ?? 0, tone(snap.contextPercent ?? 0))}
-              <Box justifyContent="space-between">
-                <Text>
-                  <Text weight="semibold">{short(snap.contextTokens)}</Text>
-                  <Text dimColor> / {short(snap.contextWindow)}</Text>
-                </Text>
-                <Text>
-                  <Text dimColor>reste </Text>
-                  <Text color={tone(snap.contextPercent ?? 0)} weight="bold">
-                    {short(Math.max(0, snap.contextWindow - snap.contextTokens))}
-                  </Text>
-                </Text>
-              </Box>
-            </Box>
-          ) : (
-            <Text dimColor>en attente de la première réponse</Text>
-          ),
-        )}
-
-        {limits.length > 0 &&
-          card(
-            "LIMITES D'ABONNEMENT",
-            w.accountAt !== null ? (
-              <Text color={isStale ? 'warning' : 'inactive'}>relevé {ago(at - w.accountAt)}</Text>
-            ) : (
-              <Text dimColor>en tokens ≈</Text>
-            ),
-            <Box flexDirection="column">
-              {isStale && (
-                <Box marginBottom={1}>
-                  <Text color="warning">
-                    {w.accountError
-                      ? `Dernier relevé du compte en échec (${w.accountError}) : chiffres du relevé précédent, nouvel essai automatique.`
-                      : 'Relevé du compte en retard : nouvel essai automatique.'}
-                  </Text>
-                </Box>
-              )}
-              {limits.map(limitBlock)}
-              <Text dimColor size="caption">
-                % relevés auprès du compte toutes les 90 s, et juste après chaque remise à zéro. Équivalents en tokens
-                d'après ce que ce PC a consommé depuis l'ouverture de chaque fenêtre : si d'autres appareils consomment
-                aussi, ils sont sous-estimés.
-              </Text>
-            </Box>,
-            isStale ? 'warning' : 'subtle',
-          )}
       </Box>
     )
   })

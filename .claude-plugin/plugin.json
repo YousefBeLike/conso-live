@@ -1,6 +1,6 @@
 {
   "name": "conso-live",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Widget au-dessus de la saisie : tokens de la discussion en direct, limites 5 h et hebdo en tokens restants, contexte",
   "author": {
     "name": "YousefBeLike",

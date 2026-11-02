@@ -52,3 +52,36 @@ test('the band draws limits and context with meters', async ($, on) => {
     await ui.unmount()
   }
 })
+
+const PANE = {
+  plugin: 'conso-live',
+  component: 'Pane',
+  requestId: 'conso-live',
+  props: {
+    title: 'Conso Claude',
+    isFocused: false,
+    bodyColumns: 44,
+    placement: 'dock',
+    scroll: { offset: 0, bodyRows: 40 },
+    view: {},
+  },
+} as const
+
+test('the details pane draws its sections with donuts', async ($, on) => {
+  on('session.measure', (_, e) => ({ changed: e.changed }))
+  const resetsAt = new Date(Date.now() + 2 * 3600_000).toISOString()
+  // @ts-ignore: raised the way the engine raises it
+  await $.session.measure({
+    context: { window: 200_000, tokens: 68_000, percent: 34 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 42, resetsAt }],
+    changed: [],
+  })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    for (const title of ['Cette discussion', "Limites d'abonnement", 'Contexte', 'Toutes les discussions']) {
+      expect((await ui.find({ type: 'Text', text: title }))?.text).toBe(title)
+    }
+    if (surface === 'desktop') expect(await ui.find({ type: 'Svg' })).toBeTruthy()
+    await ui.unmount()
+  }
+})

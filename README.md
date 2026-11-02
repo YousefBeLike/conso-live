@@ -15,6 +15,9 @@ Chaque mesure a sa couleur (orange pour 5 h, bleu pour la semaine, vert pour le 
 
 ## Le panneau de détail
 
+Le même style que le widget : des sections sous un petit titre, sans cadres, un donut à côté de chaque chiffre et la même couleur pour la même mesure.
+
+
 - **Cette discussion** : le total de tokens, un compteur qui défile pendant que Claude écrit (jusqu'à 20 rafraîchissements par seconde), les tokens générés par seconde, et le détail entrée / sortie / cache lu / cache écrit, avec le nombre de requêtes et le coût équivalent API.
 - **Toutes discussions** :
   - **Ce PC** : le débit exact de toutes les sessions Claude Code de la machine, en tokens par seconde, lu dix fois par seconde dans leurs journaux (`~/.claude/projects`). En dessous, le total consommé sur la fenêtre de 5 h et sur la semaine.
