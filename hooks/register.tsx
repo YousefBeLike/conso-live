@@ -111,7 +111,9 @@ const inTokens = (lim: Limit, calib: Calibration, w: Wide) => {
 const full = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
 
 const short = (n: number) =>
-  n >= 1_000_000
+  n >= 1_000_000_000
+    ? `${(n / 1_000_000_000).toFixed(2).replace('.', ',')} Md`
+    : n >= 1_000_000
     ? `${(n / 1_000_000).toFixed(2).replace('.', ',')} M`
     : n >= 10_000
       ? `${Math.round(n / 1_000)} k`
@@ -366,8 +368,9 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The widget above the prompt: this discussion's tokens live, the 5-hour and
-  // weekly limits in tokens left, the context; one line wide where it fits.
+  // The widget above the prompt, as a bento: this discussion's tokens in the
+  // wide tile, a tile per limit and one for the context, and a footer line
+  // with the machine's rate, the account's reading and the details.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const table = $.ui.resolve(e)
@@ -381,6 +384,7 @@ export const register: Register = on => {
     const at = (await read($, now)) || Date.now()
     const isStreaming = l.streams > 0
     const total = sumTokens(t) + l.estimate
+    const pcRate = w.localTotal + l.rate
     const isStale = w.accountError !== null || (w.accountAt !== null && at - w.accountAt > STALE_MS)
     const limits = (w.accountLimits ?? snap?.limits ?? [])
       .map(lim => current(lim, at))
@@ -389,70 +393,120 @@ export const register: Register = on => {
 
     const meter = (percent: number) =>
       Svg ? (
-        <Svg source={meterSvg(percent, 56, 6)} alt={`${percent} %`} width={56} height={6} />
+        <Svg source={meterSvg(percent, 132, 6)} alt={`${percent} %`} width={132} height={6} />
       ) : (
         <Text mono>
-          <Text color={METER_COLOR(percent)}>{'━'.repeat(Math.round(Math.min(100, Math.max(0, percent)) / 12.5))}</Text>
-          <Text color="subtle">{'━'.repeat(8 - Math.round(Math.min(100, Math.max(0, percent)) / 12.5))}</Text>
+          <Text color={METER_COLOR(percent)}>{'━'.repeat(Math.round(Math.min(100, Math.max(0, percent)) / 6.25))}</Text>
+          <Text color="subtle">{'━'.repeat(16 - Math.round(Math.min(100, Math.max(0, percent)) / 6.25))}</Text>
         </Text>
       )
 
-    const item = (key: string, label: string, body: JSX.Element[]) => (
-      <Box key={key} flexDirection="row" alignItems="center" gap={1}>
-        <Text dimColor size="caption">
-          {label}
-        </Text>
+    // One tile: its name and an aside on top, the figure, then what it means.
+    const tile = (key: string, label: string, aside: JSX.Element | null, body: JSX.Element[], grow = 1) => (
+      <Box
+        key={key}
+        flexDirection="column"
+        flexGrow={grow}
+        flexShrink={1}
+        minWidth={24}
+        borderStyle="round"
+        borderColor={key === 'session' && isStreaming ? 'claude' : 'subtle'}
+        paddingX={1}
+      >
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" gap={1}>
+          <Text size="caption" weight="medium" dimColor>
+            {label}
+          </Text>
+          {aside}
+        </Box>
         {body}
       </Box>
     )
 
-    const SHORT_LABELS: Record<string, string> = { five_hour: '5 h', seven_day: 'Semaine' }
+    const SHORT_LABELS: Record<string, string> = { five_hour: 'Fenêtre 5 h', seven_day: 'Semaine' }
 
     return (
-      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} paddingX={1}>
-        {item('session', 'Discussion', [
-          <Text color={isStreaming ? 'claude' : 'inactive'}>●</Text>,
-          <Text size="footnote" weight="semibold" tabular>
-            {full(total)}
-          </Text>,
-          <Text size="footnote" color={isStreaming ? 'claude' : undefined} dimColor={!isStreaming} tabular>
-            {isStreaming ? `+${full(l.estimate)} · ${full(l.rate)} tok/s` : 'tokens'}
-          </Text>,
-        ])}
+      <Box flexDirection="column" paddingX={1}>
+        <Box flexDirection="row" flexWrap="wrap" columnGap={1} rowGap={1}>
+          {tile(
+            'session',
+            'Cette discussion',
+            isStreaming ? (
+              <Text size="caption" color="claude" weight="medium">
+                ● en direct
+              </Text>
+            ) : (
+              <Text size="caption" color="inactive">
+                ○ en attente
+              </Text>
+            ),
+            [
+              <Text size="heading" weight="semibold" tabular>
+                {full(total)}
+                <Text size="footnote" dimColor weight="regular">
+                  {' '}tokens
+                </Text>
+              </Text>,
+              <Text size="footnote" color={isStreaming ? 'claude' : undefined} dimColor={!isStreaming} tabular>
+                {isStreaming
+                  ? `+${full(l.estimate)} en cours · ${full(l.rate)} tok/s`
+                  : `${t.requests} requête${t.requests > 1 ? 's' : ''}${snap?.costUsd !== undefined ? ` · ${snap.costUsd.toFixed(2).replace('.', ',')} $ API` : ''}`}
+              </Text>,
+            ],
+            2,
+          )}
 
-        {limits.map(lim => {
-          const figures = inTokens(lim, calib, w)
-          return item(lim.kind, SHORT_LABELS[lim.kind] ?? LABELS[lim.kind] ?? lim.kind, [
-            meter(lim.percentUsed),
-            <Text size="footnote" weight="semibold" color={METER_COLOR(lim.percentUsed)} tabular>
-              {lim.percentUsed} %
-            </Text>,
-            <Text size="footnote" dimColor tabular>
-              {[
-                figures ? `≈ ${short(figures.left)} restants` : null,
-                lim.isReset ? 'remis à zéro' : lim.resetsAt ? fmtReset(lim.resetsAt, at) : null,
-              ]
-                .filter(Boolean)
-                .join(' · ')}
-            </Text>,
-          ])
-        })}
+          {limits.map(lim => {
+            const figures = inTokens(lim, calib, w)
+            return tile(
+              lim.kind,
+              SHORT_LABELS[lim.kind] ?? LABELS[lim.kind] ?? lim.kind,
+              <Text size="caption" dimColor tabular>
+                {lim.isReset ? 'remis à zéro' : lim.resetsAt ? `↻ ${fmtReset(lim.resetsAt, at)}` : ''}
+              </Text>,
+              [
+                <Text size="heading" weight="semibold" color={METER_COLOR(lim.percentUsed)} tabular>
+                  {lim.percentUsed} %
+                </Text>,
+                meter(lim.percentUsed),
+                <Text size="footnote" dimColor tabular>
+                  {figures ? `≈ ${short(figures.left)} restants sur ${short(figures.capacity)}` : 'calibrage en cours…'}
+                </Text>,
+              ],
+            )
+          })}
 
-        {snap?.contextPercent !== undefined &&
-          item('context', 'Contexte', [
-            meter(snap.contextPercent),
-            <Text size="footnote" weight="semibold" color={METER_COLOR(snap.contextPercent)} tabular>
-              {snap.contextPercent} %
-            </Text>,
-          ])}
+          {snap?.contextTokens !== undefined &&
+            tile(
+              'context',
+              'Contexte',
+              null,
+              [
+                <Text size="heading" weight="semibold" color={METER_COLOR(snap.contextPercent ?? 0)} tabular>
+                  {snap.contextPercent ?? 0} %
+                </Text>,
+                meter(snap.contextPercent ?? 0),
+                <Text size="footnote" dimColor tabular>
+                  {short(snap.contextTokens)} / {short(snap.contextWindow)}
+                </Text>,
+              ],
+            )}
+        </Box>
 
-        {isStale && (
-          <Text size="caption" color="warning">
-            {w.accountError ? `relevé en échec (${w.accountError})` : `relevé ${ago(at - (w.accountAt ?? at))}`}
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center" marginTop={1} gap={2}>
+          <Text size="caption" dimColor tabular>
+            Ce PC {full(pcRate)} tok/s · {Math.max(w.localSessions, isStreaming ? 1 : 0)} discussion
+            {Math.max(w.localSessions, isStreaming ? 1 : 0) > 1 ? 's' : ''} active
+            {Math.max(w.localSessions, isStreaming ? 1 : 0) > 1 ? 's' : ''}
+            {w.accountAt !== null ? ` · compte relevé ${ago(at - w.accountAt)}` : ''}
           </Text>
-        )}
-
-        <Button key="details" plain dimColor label="Détails" onPress={() => void $.ui.open({ id: PANE, title: TITLE })} />
+          {isStale && (
+            <Text size="caption" color="warning">
+              {w.accountError === 'http-429' ? 'API du compte saturée, nouvel essai auto' : 'relevé du compte en retard'}
+            </Text>
+          )}
+          <Button key="details" plain dimColor label="Détails ›" onPress={() => void $.ui.open({ id: PANE, title: TITLE })} />
+        </Box>
       </Box>
     )
   })
@@ -715,7 +769,7 @@ export const register: Register = on => {
               )}
               {limits.map(limitBlock)}
               <Text dimColor size="caption">
-                % relevés auprès du compte chaque minute, et juste après chaque remise à zéro. Équivalents en tokens
+                % relevés auprès du compte toutes les 90 s, et juste après chaque remise à zéro. Équivalents en tokens
                 d'après ce que ce PC a consommé depuis l'ouverture de chaque fenêtre : si d'autres appareils consomment
                 aussi, ils sont sous-estimés.
               </Text>

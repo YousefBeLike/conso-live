@@ -6,7 +6,7 @@ Two sources:
   each response; the last seven days are read once at start, so the limits
   can be weighed in tokens at once;
 - account: the subscription's usage endpoint on api.anthropic.com, read once
-  a minute, for each window's percentage, which every client of the account
+  every 90 seconds, for each window's percentage, which every client of the account
   moves (claude.ai, other machines, other people).
 
 Every session runs its own watcher, but the account is read by one of them at
@@ -55,7 +55,7 @@ FRESH = 30.0          # a response newer than this moves the rate
 IDLE = 20.0           # with no response for this long, the rate falls fast
 IDLE_TAU = 2.0
 ACTIVE = 45.0         # a session whose transcript grew this recently is active
-POLL = 60.0           # seconds between account readings
+POLL = 90.0           # seconds between account readings: the endpoint is shared by every machine of the account
 CHECK = 2.0           # seconds between looks at the shared reading
 AFTER_RESET = 5.0     # seconds after a reset before the account is read again
 MAX_BACKOFF = 600.0

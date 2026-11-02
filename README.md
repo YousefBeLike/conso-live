@@ -4,14 +4,14 @@ Plugin Claude Code : un widget au-dessus de la zone de saisie qui affiche ta con
 
 ## Le widget
 
-Une ligne discrète, au style de Claude Desktop, juste au-dessus de la barre d'écriture :
+Une grille de tuiles (style bento) au-dessus de la barre d'écriture, au style de Claude Desktop :
 
-- **Discussion** : les tokens de la discussion, qui défilent pendant que Claude écrit, avec le débit en tok/s ;
-- **5 h** et **Semaine** : une jauge, le pourcentage, les tokens restants estimés et le temps avant la remise à zéro (les limites Opus ou Sonnet de la semaine s'ajoutent quand elles passent 50 %) ;
-- **Contexte** : le remplissage de la fenêtre de contexte ;
-- **Détails** : ouvre le panneau complet.
+- **Cette discussion**, la tuile large : le total de tokens, qui défile pendant que Claude écrit, avec le débit en tok/s, ou le nombre de requêtes et le coût équivalent API au repos ;
+- **Fenêtre 5 h** et **Semaine** : le pourcentage, une jauge, les tokens restants estimés sur le total, et le temps avant la remise à zéro (les limites Opus ou Sonnet de la semaine s'ajoutent quand elles passent 50 %) ;
+- **Contexte** : le remplissage de la fenêtre de contexte, en tokens ;
+- en pied : le débit de tous les Claude Code de la machine, le nombre de discussions actives, l'âge du dernier relevé du compte, et **Détails ›**, qui ouvre le panneau complet.
 
-Les jauges passent à l'ambre à 70 % et au rouge à 90 %. Le `[-]` à droite du widget le replie.
+Les jauges passent à l'ambre à 70 % et au rouge à 90 %. Les tuiles passent à la ligne quand la fenêtre est étroite. Le `[-]` à droite du widget le replie.
 
 ## Le panneau de détail
 
@@ -53,7 +53,7 @@ Le widget apparaît dans chaque session. Le bouton **Détails** ou la commande `
 Le script `scripts/conso-watch.py` fait les relevés :
 
 - il lit les journaux de Claude Code dans `~/.claude/projects` (ou `$CLAUDE_CONFIG_DIR/projects`) ;
-- toutes les minutes, et quelques secondes après chaque remise à zéro d'une fenêtre, il interroge `https://api.anthropic.com/api/oauth/usage` avec le jeton de connexion de Claude Code (`~/.claude/.credentials.json`), pour lire les pourcentages des limites.
+- toutes les 90 secondes, et quelques secondes après chaque remise à zéro d'une fenêtre, il interroge `https://api.anthropic.com/api/oauth/usage` avec le jeton de connexion de Claude Code (`~/.claude/.credentials.json`), pour lire les pourcentages des limites.
 
 Chaque session lance son propre relevé, mais un seul interroge le compte à la fois : la réponse est partagée par un fichier de cache, `~/.cache/conso-live/usage.json`. Dix sessions ouvertes font donc autant d'appels qu'une seule, ce qui évite d'être limité par l'API. Si un relevé échoue, le panneau garde les derniers chiffres, l'indique en orange et réessaie tout seul. Si le script s'arrête, il est relancé automatiquement.
 
