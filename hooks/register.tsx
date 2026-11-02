@@ -80,6 +80,33 @@ const sumTokens = (t: Totals) => t.input + t.output + t.cacheRead + t.cacheWrite
 
 const tone = (percent: number): Color => (percent >= 90 ? 'error' : percent >= 70 ? 'warning' : 'success')
 
+// The band's meters are drawn as images on the desktop, where theme names do
+// not reach: Claude's own orange, and amber and red past the same thresholds,
+// over a grey that reads on the light and the dark theme alike.
+const METER_HEX = (percent: number) => (percent >= 90 ? '#C6463D' : percent >= 70 ? '#C98A1B' : '#D97757')
+const METER_COLOR = (percent: number): Color => (percent >= 90 ? 'error' : percent >= 70 ? 'warning' : 'claude')
+
+const meterSvg = (percent: number, width: number, height: number) => {
+  const fill = Math.round((Math.min(100, Math.max(0, percent)) / 100) * width)
+  const r = height / 2
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">` +
+    `<rect width="${width}" height="${height}" rx="${r}" fill="#8B857C" fill-opacity="0.28"/>` +
+    (fill > 0 ? `<rect width="${Math.max(fill, height)}" height="${height}" rx="${r}" fill="${METER_HEX(percent)}"/>` : '') +
+    '</svg>'
+  )
+}
+
+// A limit in tokens: this machine's count is live, the percent a minute old
+// at most, so the larger of the two is the better reading of what is used.
+const inTokens = (lim: Limit, calib: Calibration, w: Wide) => {
+  const cal = calib[lim.kind]
+  if (!cal) return null
+  const capacity = cal.perPercent * 100
+  const used = Math.max(cal.perPercent * lim.percentUsed, w.windows[lim.kind]?.total ?? 0)
+  return { used, capacity, left: Math.max(0, capacity - used) }
+}
+
 // Full figure grouped by thousands: 1 234 567.
 const full = (n: number) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
 
@@ -274,11 +301,11 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'conso',
-      description: 'Ouvre le panneau de consommation de tokens en direct',
+      description: 'Ouvre le détail de la consommation de tokens (le widget reste au-dessus de la saisie)',
     })
     const kept = (await $.store.get('calibration')) as Calibration | undefined
     if (kept) await update($, calibration, () => kept)
-    void $.ui.open({ id: PANE, title: TITLE })
+    // The band above the prompt shows itself; the pane opens on demand.
     await refresh($)
     await update($, live, () => ({ estimate: 0, rate: 0, streams: 0 }))
     await update($, wide, () => IDLE_WIDE)
@@ -337,6 +364,97 @@ export const register: Register = on => {
     await calibrate($, e.rateLimits)
 
     return next(e)
+  })
+
+  // The widget above the prompt: this discussion's tokens live, the 5-hour and
+  // weekly limits in tokens left, the context; one line wide where it fits.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    const table = $.ui.resolve(e)
+    const { Box, Text, Button } = table
+    const Svg = 'Svg' in table ? table.Svg : undefined
+    const snap = await read($, snapshot)
+    const t = await read($, totals)
+    const l = await read($, live)
+    const calib = await read($, calibration)
+    const w = await read($, wide)
+    const at = (await read($, now)) || Date.now()
+    const isStreaming = l.streams > 0
+    const total = sumTokens(t) + l.estimate
+    const isStale = w.accountError !== null || (w.accountAt !== null && at - w.accountAt > STALE_MS)
+    const limits = (w.accountLimits ?? snap?.limits ?? [])
+      .map(lim => current(lim, at))
+      // The two windows everyone has, and a model's own week once it bites.
+      .filter(lim => lim.kind === 'five_hour' || lim.kind === 'seven_day' || (lim.kind.startsWith('seven_day_') && lim.percentUsed >= 50))
+
+    const meter = (percent: number) =>
+      Svg ? (
+        <Svg source={meterSvg(percent, 56, 6)} alt={`${percent} %`} width={56} height={6} />
+      ) : (
+        <Text mono>
+          <Text color={METER_COLOR(percent)}>{'━'.repeat(Math.round(Math.min(100, Math.max(0, percent)) / 12.5))}</Text>
+          <Text color="subtle">{'━'.repeat(8 - Math.round(Math.min(100, Math.max(0, percent)) / 12.5))}</Text>
+        </Text>
+      )
+
+    const item = (key: string, label: string, body: JSX.Element[]) => (
+      <Box key={key} flexDirection="row" alignItems="center" gap={1}>
+        <Text dimColor size="caption">
+          {label}
+        </Text>
+        {body}
+      </Box>
+    )
+
+    const SHORT_LABELS: Record<string, string> = { five_hour: '5 h', seven_day: 'Semaine' }
+
+    return (
+      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3} paddingX={1}>
+        {item('session', 'Discussion', [
+          <Text color={isStreaming ? 'claude' : 'inactive'}>●</Text>,
+          <Text size="footnote" weight="semibold" tabular>
+            {full(total)}
+          </Text>,
+          <Text size="footnote" color={isStreaming ? 'claude' : undefined} dimColor={!isStreaming} tabular>
+            {isStreaming ? `+${full(l.estimate)} · ${full(l.rate)} tok/s` : 'tokens'}
+          </Text>,
+        ])}
+
+        {limits.map(lim => {
+          const figures = inTokens(lim, calib, w)
+          return item(lim.kind, SHORT_LABELS[lim.kind] ?? LABELS[lim.kind] ?? lim.kind, [
+            meter(lim.percentUsed),
+            <Text size="footnote" weight="semibold" color={METER_COLOR(lim.percentUsed)} tabular>
+              {lim.percentUsed} %
+            </Text>,
+            <Text size="footnote" dimColor tabular>
+              {[
+                figures ? `≈ ${short(figures.left)} restants` : null,
+                lim.isReset ? 'remis à zéro' : lim.resetsAt ? fmtReset(lim.resetsAt, at) : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </Text>,
+          ])
+        })}
+
+        {snap?.contextPercent !== undefined &&
+          item('context', 'Contexte', [
+            meter(snap.contextPercent),
+            <Text size="footnote" weight="semibold" color={METER_COLOR(snap.contextPercent)} tabular>
+              {snap.contextPercent} %
+            </Text>,
+          ])}
+
+        {isStale && (
+          <Text size="caption" color="warning">
+            {w.accountError ? `relevé en échec (${w.accountError})` : `relevé ${ago(at - (w.accountAt ?? at))}`}
+          </Text>
+        )}
+
+        <Button key="details" plain dimColor label="Détails" onPress={() => void $.ui.open({ id: PANE, title: TITLE })} />
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -405,9 +523,9 @@ export const register: Register = on => {
     const limitBlock = (lim: Limit & { isReset: boolean }) => {
       const cal = calib[lim.kind]
       const color = tone(lim.percentUsed)
-      const capacity = cal ? cal.perPercent * 100 : 0
-      // The percent is read once a minute; this machine's count is live.
-      const used = cal ? Math.max(cal.perPercent * lim.percentUsed, w.windows[lim.kind]?.total ?? 0) : 0
+      const figures = inTokens(lim, calib, w)
+      const capacity = figures?.capacity ?? 0
+      const used = figures?.used ?? 0
       return (
         <Box flexDirection="column" marginBottom={1}>
           <Box justifyContent="space-between">

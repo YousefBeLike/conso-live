@@ -1,7 +1,7 @@
 {
   "name": "conso-live",
-  "version": "0.3.0",
-  "description": "Panneau de consommation Claude en direct : limites 5 h et hebdo, tokens consommés, contexte et coût",
+  "version": "0.4.0",
+  "description": "Widget au-dessus de la saisie : tokens de la discussion en direct, limites 5 h et hebdo en tokens restants, contexte",
   "author": {
     "name": "YousefBeLike",
     "url": "https://github.com/YousefBeLike"

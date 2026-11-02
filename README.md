@@ -1,8 +1,19 @@
 # conso-live
 
-Plugin Claude Code : un panneau à côté de la conversation qui affiche ta consommation de tokens Claude en direct.
+Plugin Claude Code : un widget au-dessus de la zone de saisie qui affiche ta consommation de tokens Claude en direct, avec un panneau de détail à la demande.
 
-## Ce qu'il affiche
+## Le widget
+
+Une ligne discrète, au style de Claude Desktop, juste au-dessus de la barre d'écriture :
+
+- **Discussion** : les tokens de la discussion, qui défilent pendant que Claude écrit, avec le débit en tok/s ;
+- **5 h** et **Semaine** : une jauge, le pourcentage, les tokens restants estimés et le temps avant la remise à zéro (les limites Opus ou Sonnet de la semaine s'ajoutent quand elles passent 50 %) ;
+- **Contexte** : le remplissage de la fenêtre de contexte ;
+- **Détails** : ouvre le panneau complet.
+
+Les jauges passent à l'ambre à 70 % et au rouge à 90 %. Le `[-]` à droite du widget le replie.
+
+## Le panneau de détail
 
 - **Cette discussion** : le total de tokens, un compteur qui défile pendant que Claude écrit (jusqu'à 20 rafraîchissements par seconde), les tokens générés par seconde, et le détail entrée / sortie / cache lu / cache écrit, avec le nombre de requêtes et le coût équivalent API.
 - **Toutes discussions** :
@@ -35,7 +46,7 @@ Dans l'application de bureau, où `/plugin` n'est pas disponible : clique sur **
 
 ## Utilisation
 
-Le panneau s'ouvre au démarrage de chaque session. Si tu le fermes, la commande `/conso` le rouvre.
+Le widget apparaît dans chaque session. Le bouton **Détails** ou la commande `/conso` ouvre le panneau complet.
 
 ## Données et réseau
 
